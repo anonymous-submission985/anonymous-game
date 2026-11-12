@@ -1,0 +1,226 @@
+# 10d-game Python bindings
+
+The `xdgame` package provides Python bindings for the 10d-game engine. It loads
+the engine as a WebAssembly module through [Wasmtime] and
+exposes its configuration, game state, and generated images through a
+Python-friendly API. Fields of view and rendered maps are returned as NumPy
+arrays.
+
+The WebAssembly module is supplied when creating an `xdgame.Game`, so the same
+Python package can be used with different builds of the engine.
+
+## Install from source
+
+The bindings require Python 3.14 or newer. Before using them, you need a
+compiled `10d_game.wasm` module.
+
+A compiled module is included at `build/10d_game.wasm` in the archive root.
+Pass its path when creating an `xdgame.Game` or as the first positional
+argument to the command-line tools. The examples below use this bundled module.
+
+To rebuild it from source, run `make wasm` from the archive root with a working
+Emscripten SDK; see the [top-level build instructions].
+
+### Using uv
+
+From the repository root, install the package and its runtime dependencies
+with [uv]:
+
+```bash
+cd bindings/python
+uv sync --locked
+```
+
+This creates a virtual environment under `bindings/python/.venv`. Use
+`uv run` for commands that should run inside it.
+
+### Using pip
+
+If [uv] is not your thing, good old pip works as well:
+
+```bash
+cd bindings/python
+python3.14 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+```
+
+## Quick example
+
+The following example creates a game with the engine defaults, advances it by
+one tick, and retrieves the agent's field of view together with a larger map of
+the surrounding world. Both images are NumPy arrays with dtype `numpy.uint8`
+and shape `(height, width, 3)`. They store RGB pixels in row-major order, with
+the red, green, and blue values in the final dimension. Row zero represents the
+lowest world row in the image.
+
+```python
+from pathlib import Path
+
+import xdgame
+
+wasm_path = Path("build/10d_game.wasm")
+with xdgame.Game(wasm_path, seed=42) as game:
+    reward = game.tick(xdgame.Action.NOP)
+    fov = game.fov
+    map_image = game.generate_map(
+        center=(0, 0),
+        shape=(256, 256),
+        time=0,
+    )
+
+print(f"       reward: {reward}")
+print(f"field of view: {fov.shape}")
+print(f"          map: {map_image.shape}")
+```
+
+Save the example as `example.py` in the repository root so that the relative
+path to the WebAssembly module resolves correctly. Run it through the [uv]
+environment with:
+
+```bash
+uv run --project bindings/python python example.py
+```
+
+When using the activated pip environment, run it directly:
+
+```bash
+cd ../..
+python example.py
+```
+
+It prints:
+
+```text
+       reward: 1.0
+field of view: (25, 25, 3)
+          map: (256, 256, 3)
+```
+
+For agent-training loops, the package also provides `XDGameEnv`, a Gym-style
+interface with the canonical `reset()`, `step()`, and `close()` methods. See the
+[Python documentation] for details.
+
+## Render a map from the command line
+
+The game world is generated procedurally and deterministically from its seed and
+configuration. Its generation does not depend on how the agent moves:
+given the same seed and configuration, an agent encounters the same world in the
+same places. The agent changes the world only by removing beans when eating or
+picking them up, and by placing carried beans when dropping them.
+
+The package installs `xdgame-render-map`, a command-line tool for investigating
+this procedurally generated world without moving an agent through it. It renders
+a selected region to a PNG file. From `bindings/python`, run:
+
+```bash
+uv run xdgame-render-map \
+    ../../build/10d_game.wasm \
+    map.png \
+    --seed 42 \
+    --width 512 \
+    --height 512
+```
+
+When using an activated pip environment, simply leave off the `uv run` prefix.
+
+The map is centered at world position `(0, 0)` and rendered at time zero by
+default. The PNG records the seed, center coordinates, dimensions, and time in
+`xdgame.*` text metadata fields. Use `--center X Y` or `--time T` to select
+different values. A TOML configuration can be supplied with `--config`:
+
+```bash
+uv run xdgame-render-map \
+    ../../build/10d_game.wasm \
+    map.png \
+    --config game-engine-config.toml \
+    --seed 42 \
+    --width 512 \
+    --height 512
+```
+
+To create a TOML file containing the game engine's default configuration, use:
+
+```bash
+uv run xdgame-render-map \
+    ../../build/10d_game.wasm \
+    --write-default-config game-engine-config.toml
+```
+
+Run `uv run xdgame-render-map --help` for the complete command-line reference.
+
+## Control an agent
+
+The optional graphical interface lets a human control an agent one action at a
+time. With uv, request the optional GUI dependency when launching it:
+
+```bash
+uv run --extra gui xdgame-play \
+    ../../build/10d_game.wasm \
+    --seed 42
+```
+
+If you installed the package with pip, install the GUI dependency once and
+then invoke the executable directly:
+
+```bash
+python -m pip install ".[gui]"
+xdgame-play \
+    ../../build/10d_game.wasm \
+    --seed 42
+```
+
+The WebAssembly module and world seed are required at startup. Without a
+configuration file, the game-engine defaults are used.
+
+Use `--config game-engine-config.toml` to overwrite the defaults with values
+from a TOML file. All startup options are command-line arguments; the interface
+does not provide in-game loading.
+
+The window displays the field of view, satiety and hydration levels, inventory
+state, cumulative reward, and all available actions. Use `W`, `A`, `S`, and `D`
+or the arrow keys to move, `E` to eat, `F` to pick up a bean, `R` to drop it,
+and `Space` to wait. Hold a movement key or `Space` for 500 ms to repeat that
+action at 10 Hz. Press `Q` or `Escape` to quit.
+
+## Development
+
+Install the project together with its development dependencies from
+`bindings/python`:
+
+```bash
+uv sync --group dev
+uv run --group dev ruff check .
+```
+
+The test suite expects the WebAssembly module at `../../build/10d_game.wasm`.
+Set `XDGAME_WASM_PATH` to use a module stored elsewhere; the same override is
+used by direct pytest runs:
+
+```bash
+XDGAME_WASM_PATH=/path/to/10d_game.wasm uv run --group dev pytest
+```
+
+Build the WebAssembly module and run the test suite:
+
+```bash
+cd ../..
+make wasm
+cd bindings/python
+uv run --group dev pytest
+```
+
+To build the Sphinx documentation, install the documentation dependencies and
+run Sphinx with warnings treated as errors:
+
+```bash
+uv sync --group docs
+uv run --group docs sphinx-build -W -b html docs docs/_build/html
+```
+
+The generated documentation starts at `docs/_build/html/index.html`.
+
+[Python documentation]: docs/api.rst
+[top-level build instructions]: ../../README.md#rebuild-webassembly-and-the-browser-game
+[uv]: https://docs.astral.sh/uv/
+[Wasmtime]: https://wasmtime.dev/
